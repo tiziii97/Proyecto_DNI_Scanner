@@ -1,0 +1,243 @@
+# frontend.py
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
+import httpx
+
+app = FastAPI()
+
+BACKEND_URL = "http://localhost:8000"  # tu backend
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{BACKEND_URL}/personas/")
+        personas = r.json()
+
+    html = f"""
+    <html>
+        <head>
+            <title>Personas</title>
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <style>
+              body {{ font-family: Arial, sans-serif; padding:20px; }}
+              video {{ max-width:100%; border:1px solid #ddd; }}
+              #scanner-ui {{ margin-top:20px; }}
+              #result {{ margin-top:10px; font-weight:600; color:green; }}
+            </style>
+        </head>
+        <body>
+            <h1>Listado de Personas</h1>
+            <ul>
+    """
+    for p in personas:
+        html += f"<li>{p['id']} - {p['nombre']} {p['apellido']} (DNI: {p['dni']})</li>"
+
+    html += """
+            </ul>
+
+            <h2>Agregar Persona</h2>
+            <form action="/add" method="post">
+                Nombre: <input type="text" name="nombre" id="nombre"><br>
+                Apellido: <input type="text" name="apellido" id="apellido"><br>
+                DNI: <input type="text" name="dni" id="dni"><br>
+                Dirección: <input type="text" name="direccion"><br>
+                Género: <input type="text" name="genero"><br>
+                Fecha Nac: <input type="date" name="fecha_nacimiento"><br>
+                <input type="submit" value="Crear">
+            </form>
+
+            <hr>
+
+            <h2>Escanear PDF417 (cámara)</h2>
+            <div id="scanner-ui">
+                <video id="video" playsinline></video><br>
+                <button id="startBtn">Iniciar escáner PDF417</button>
+                <button id="stopBtn" disabled>Detener</button>
+                <div id="result">Resultado: <span id="resultText">—</span></div>
+            </div>
+
+            <script>
+            (function() {{
+                const startBtn = document.getElementById('startBtn');
+                const stopBtn  = document.getElementById('stopBtn');
+                const video    = document.getElementById('video');
+                const resultEl = document.getElementById('resultText');
+
+                let stream = null;
+                let scanInterval = null;
+                let barcodeDetector = null;
+
+                async function startCamera() {{
+                    try {{
+                        stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }}, audio: false }});
+                        video.srcObject = stream;
+                        await video.play();
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                        // Try native BarcodeDetector first
+                        if ('BarcodeDetector' in window) {{
+                            try {{
+                                const supported = await BarcodeDetector.getSupportedFormats();
+                                // if pdf417 supported, create detector requesting pdf417
+                                if (supported.includes('pdf417')) {{
+                                    barcodeDetector = new BarcodeDetector({{ formats: ['pdf417'] }});
+                                    console.log('Usando BarcodeDetector nativo (pdf417)'); 
+                                }} else {{
+                                    console.log('BarcodeDetector existe pero NO soporta pdf417 en este dispositivo.');
+                                    barcodeDetector = null;
+                                }}
+                            }} catch (e) {{
+                                console.warn('Error al consultar BarcodeDetector.getSupportedFormats():', e);
+                                barcodeDetector = null;
+                            }}
+                        }}
+
+                        // If we have a detector, poll frames
+                        if (barcodeDetector) {{
+                            scanInterval = setInterval(detectWithBarcodeDetector, 250);
+                        }} else {{
+                            // fallback: capture frame to canvas and send to ZXing if you included it
+                            // we will attempt a simple fallback using ZXing if available
+                            if (window.ZXing) {{
+                                console.log('Usando fallback ZXing');
+                                scanInterval = setInterval(detectWithZXing, 300);
+                            }} else {{
+                                console.warn('No hay BarcodeDetector nativo ni ZXing. PDF417 puede no funcionar.');
+                                resultEl.textContent = 'No soportado en este navegador (necesitas BarcodeDetector o ZXing).';
+                            }}
+                        }}
+                    }} catch (err) {{
+                        console.error('getUserMedia error:', err);
+                        alert('No se pudo acceder a la cámara: ' + err.message);
+                    }}
+                }}
+
+                async function detectWithBarcodeDetector() {{
+                    try {{
+                        const barcodes = await barcodeDetector.detect(video);
+                        if (barcodes.length) {{
+                            // toma el primero
+                            const b = barcodes[0];
+                            resultEl.textContent = b.rawValue || JSON.stringify(b);
+                            onDetected(b.rawValue || '');
+                        }}
+                    }} catch (e) {{
+                        console.error('Error BarcodeDetector.detect:', e);
+                    }}
+                }}
+
+                // Simple canvas capture for ZXing fallback
+                function captureFrame() {{
+                    const canvas = document.createElement('canvas');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    return canvas;
+                }}
+
+                async function detectWithZXing() {{
+                    try {{
+                        const canvas = captureFrame();
+                        const dataUrl = canvas.toDataURL('image/png');
+                        // ZXing expects a binary or image element; usamos la librería zxing-js/library si la incluiste
+                        if (window.ZXing && window.ZXing.BrowserMultiFormatReader) {{
+                            if (!window._zxingReader) {{
+                                window._zxingReader = new ZXing.BrowserMultiFormatReader();
+                            }}
+                            try {{
+                                const result = await window._zxingReader.decodeFromImage(undefined, dataUrl);
+                                if (result) {{
+                                    resultEl.textContent = result.text;
+                                    onDetected(result.text);
+                                }}
+                            }} catch (e) {{
+                                // decodeFromImage lanza cuando no encuentra nada — es normal
+                            }}
+                        }}
+                    }} catch (e) {{
+                        console.error('Error detectWithZXing:', e);
+                    }}
+                }}
+
+                function stopCamera() {{
+                    if (scanInterval) {{
+                        clearInterval(scanInterval);
+                        scanInterval = null;
+                    }}
+                    if (stream) {{
+                        stream.getTracks().forEach(t => t.stop());
+                        stream = null;
+                    }}
+                    video.pause();
+                    video.srcObject = null;
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                }}
+
+                // Callback cuando encontramos algo
+                async function onDetected(decodedText) {{
+                    if (!decodedText) return;
+                    // mostrar solo una vez y detener
+                    resultEl.textContent = decodedText;
+                    stopCamera();
+
+                    // ejemplo: enviar al backend
+                    try {{
+                        await fetch('{BACKEND_URL}/personas/scan', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{ raw: decodedText }})
+                        }});
+                    }} catch (err) {{
+                        console.warn('No se pudo enviar al backend:', err);
+                    }}
+
+                    // opcional: parsear campos y rellenar inputs
+                    // si tu PDF417 contiene datos en formato AAMVA u otro, parsealos y pon en el form:
+                    // document.getElementById('nombre').value = parsed.nombre;
+                    // document.getElementById('apellido').value = parsed.apellido;
+                    // document.getElementById('dni').value = parsed.dni;
+                }}
+
+                startBtn.addEventListener('click', startCamera);
+                stopBtn.addEventListener('click', stopCamera);
+
+                // --- Cargar ZXing como fallback (opcional) ---
+                (function loadZXingFallback() {{
+                    const script = document.createElement('script');
+                    // CDN para @zxing/library (verifica versión si necesitás otra)
+                    script.src = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.18.6/umd/index.min.js';
+                    script.onload = () => console.log('ZXing cargado (fallback disponible)');
+                    script.onerror = () => console.warn('No se pudo cargar ZXing fallback');
+                    document.head.appendChild(script);
+                }})();
+            }})();
+            </script>
+
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/add")
+async def add_persona(
+    nombre: str = Form(...),
+    apellido: str = Form(...),
+    dni: str = Form(...),
+    direccion: str = Form(""),
+    genero: str = Form(""),
+    fecha_nacimiento: str = Form("")
+):
+    data = {
+        "nombre": nombre,
+        "apellido": apellido,
+        "dni": dni,
+        "direccion": direccion or None,
+        "genero": genero or None,
+        "fecha_nacimiento": fecha_nacimiento or None,
+    }
+    async with httpx.AsyncClient() as client:
+        await client.post(f"{BACKEND_URL}/personas/", json=data)
+
+    return RedirectResponse("/", status_code=303)
